@@ -217,25 +217,39 @@
                         <MudSelectItem Value="10000">10,000</MudSelectItem>
                         <MudSelectItem Value="100000">100,000</MudSelectItem>
                         <MudSelectItem Value="1000000">1,000,000</MudSelectItem>
+                        <MudSelectItem Value="4000000">4,000,000</MudSelectItem>
                     </MudSelect>
                 </MudItem>
                 <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
-                    <MudButton Variant="Variant.Filled"
-                               Color="Color.Secondary"
-                               OnClick="CreateTestDataAsync"
-                               StartIcon="@Icons.Material.Filled.PlayArrow"
-                               Disabled="_isGenerating"
-                               FullWidth="true">
-                        @if (_isGenerating)
-                        {
-                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
-                            @:Generating...
-                        }
-                        else
-                        {
-                            @:Generate
-                        }
-                    </MudButton>
+                    @if (_isGenerating)
+                    {
+                        <MudStack Spacing="1" Style="width: 100%">
+                            <MudText Typo="Typo.caption" Align="Align.Center">
+                                @_generateProgress.ToString("N0") / @_generatedFakeEntries.ToString("N0")
+                            </MudText>
+                            <MudProgressLinear Color="Color.Secondary"
+                                              Value="@(_generatedFakeEntries > 0 ? (double)_generateProgress / _generatedFakeEntries * 100 : 0)"
+                                              Size="Size.Small" />
+                            <MudButton Variant="Variant.Outlined"
+                                       Color="Color.Error"
+                                       OnClick="CancelGenerate"
+                                       StartIcon="@Icons.Material.Filled.Cancel"
+                                       Size="Size.Small"
+                                       FullWidth="true">
+                                Cancel
+                            </MudButton>
+                        </MudStack>
+                    }
+                    else
+                    {
+                        <MudButton Variant="Variant.Filled"
+                                   Color="Color.Secondary"
+                                   OnClick="CreateTestDataAsync"
+                                   StartIcon="@Icons.Material.Filled.PlayArrow"
+                                   FullWidth="true">
+                            Generate
+                        </MudButton>
+                    }
                 </MudItem>
                 <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
                     <MudButton Variant="Variant.Outlined"
@@ -305,6 +319,8 @@
     private string _performanceInfo = string.Empty;
     private bool _isGenerating;
     private int _generatedFakeEntries = 100;
+    private int _generateProgress;
+    private CancellationTokenSource? _generateCts;
 
     // Delta Sync Management
     private int _tombstoneCount;
@@ -560,67 +576,91 @@
         }
     }
 
+    private void CancelGenerate()
+    {
+        _generateCts?.Cancel();
+    }
+
     private async Task CreateTestDataAsync()
     {
         _isGenerating = true;
+        _generateProgress = 0;
         _performanceInfo = string.Empty;
+        _generateCts?.Dispose();
+        _generateCts = new CancellationTokenSource();
         StateHasChanged();
 
+        var cancellationToken = _generateCts.Token;
         var stopwatch = Stopwatch.StartNew();
 
         await using var context = await DbContextFactory.CreateDbContextAsync();
 
-        // Generate all items first
-        var items = new List<TodoItem>();
-        for (var i = 0; i < _generatedFakeEntries; i++)
-        {
-            var prefix = TaskPrefixes[Random.Next(TaskPrefixes.Length)];
-            var type = TaskTypes[Random.Next(TaskTypes.Length)];
+        // Generate and insert in batches to keep memory bounded
+        const int batchSize = 10000;
+        var sqlTypeOverrides = new Dictionary<string, string> { ["Id"] = "BLOB" };
+        var totalInserted = 0;
 
-            items.Add(new TodoItem
-            {
-                Id = Guid.NewGuid(),
-                Title = $"{prefix} #{i + 1}",
-                Description = $"{type} task - {Guid.NewGuid()}",
-                UpdatedAt = DateTime.UtcNow, // Use current time for delta sync to work correctly
-                IsCompleted = Random.Next(100) < 30
-            });
-        }
-
-        // Use worker-side bulk insert via V2 MessagePack format
-        // One worker round-trip instead of ~800 ExecuteSqlRawAsync calls
         try
         {
-            var dtos = items.Select(TodoItemDto.FromEntity).ToList();
-
-            var header = MessagePackFileHeaderV2.Create<TodoItemDto>(
-                tableName: "TodoItems",
-                primaryKeyColumn: "Id",
-                recordCount: dtos.Count,
-                mode: 0,
-                sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
-
-            using var stream = new MemoryStream();
-            MessagePackSerializer.Serialize(stream, header);
-            foreach (var dto in dtos)
+            for (var batchStart = 0; batchStart < _generatedFakeEntries; batchStart += batchSize)
             {
-                MessagePackSerializer.Serialize(stream, dto);
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                var count = Math.Min(batchSize, _generatedFakeEntries - batchStart);
 
-            var payload = stream.ToArray();
-            await DatabaseService.BulkImportAsync("TodoDb.db", payload);
+                // Generate batch
+                var header = MessagePackFileHeaderV2.Create<TodoItemDto>(
+                    tableName: "TodoItems",
+                    primaryKeyColumn: "Id",
+                    recordCount: count,
+                    mode: 0,
+                    sqlTypeOverrides: sqlTypeOverrides);
+
+                using var stream = new MemoryStream();
+                MessagePackSerializer.Serialize(stream, header);
+
+                for (var i = 0; i < count; i++)
+                {
+                    var prefix = TaskPrefixes[Random.Next(TaskPrefixes.Length)];
+                    var type = TaskTypes[Random.Next(TaskTypes.Length)];
+
+                    var dto = new TodoItemDto
+                    {
+                        Id = Guid.NewGuid(),
+                        Title = $"{prefix} #{batchStart + i + 1}",
+                        Description = $"{type} task - {Guid.NewGuid()}",
+                        UpdatedAt = DateTime.UtcNow,
+                        IsCompleted = Random.Next(100) < 30
+                    };
+
+                    MessagePackSerializer.Serialize(stream, dto);
+                }
+
+                await DatabaseService.BulkImportAsync("TodoDb.db", stream.ToArray(), cancellationToken: cancellationToken);
+                totalInserted += count;
+                _generateProgress = totalInserted;
+
+                StateHasChanged();
+                await Task.Yield();
+            }
 
             stopwatch.Stop();
 
             var itemsPerSecond = _generatedFakeEntries / stopwatch.Elapsed.TotalSeconds;
-            _performanceInfo = $"Generated {_generatedFakeEntries:N0} entries in {stopwatch.ElapsedMilliseconds}ms ({itemsPerSecond:F0} items/sec) — worker bulk insert";
+            _performanceInfo = $"Generated {_generatedFakeEntries:N0} entries in {stopwatch.ElapsedMilliseconds}ms ({itemsPerSecond:F0} items/sec) — {(totalInserted + batchSize - 1) / batchSize} batches";
             _isGenerating = false;
 
             // Refresh sync state to update pending delta count
             await LoadSyncStateAsync();
 
             StateHasChanged();
-            Snackbar.Add($"Generated {_generatedFakeEntries:N0} entries in {stopwatch.ElapsedMilliseconds}ms (worker bulk insert)", Severity.Success);
+            Snackbar.Add($"Generated {_generatedFakeEntries:N0} entries in {stopwatch.ElapsedMilliseconds}ms", Severity.Success);
+        }
+        catch (OperationCanceledException)
+        {
+            _isGenerating = false;
+            _performanceInfo = $"Cancelled after {totalInserted:N0} entries";
+            Snackbar.Add($"Generation cancelled after {totalInserted:N0} entries", Severity.Warning);
+            return;
         }
         catch (Exception ex)
         {
