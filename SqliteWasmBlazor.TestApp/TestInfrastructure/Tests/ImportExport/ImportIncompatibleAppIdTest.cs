@@ -45,7 +45,8 @@ internal class ImportIncompatibleAppIdTest(IDbContextFactory<TodoDbContext> fact
                 exportStream,
                 "TodoItems",
                 "Id",
-                appIdentifier: exportAppId);
+                appIdentifier: exportAppId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
         }
 
         exportStream.Position = 0;

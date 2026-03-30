@@ -184,6 +184,11 @@
     private const string AppIdentifier = "SqliteWasmBlazor.Demo";
 
     /// <summary>
+    /// TodoItem.Id uses [Column(TypeName="BLOB")] — override the EF Core default (TEXT) for Guid
+    /// </summary>
+    private static readonly Dictionary<string, string> TodoItemSqlTypeOverrides = new() { ["Id"] = "BLOB" };
+
+    /// <summary>
     /// Schema hash computed from TodoItemDto structure (automatic validation)
     /// </summary>
     private readonly string _schemaHash = SqliteWasmBlazor.Components.Interop.SchemaHashGenerator.ComputeHash<TodoItemDto>();
@@ -291,7 +296,8 @@
             var columns = MessagePackFileHeaderV2.Create<TodoItemDto>(
                 tableName: "TodoItems",
                 primaryKeyColumn: "Id",
-                recordCount: 0).Columns;
+                recordCount: 0,
+                sqlTypeOverrides: TodoItemSqlTypeOverrides).Columns;
 
             var exportMetadata = new
             {

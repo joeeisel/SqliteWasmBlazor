@@ -67,7 +67,8 @@ internal class ExportImportLargeDatasetTest(IDbContextFactory<TodoDbContext> fac
             // Only write header on first page
             if (page == 0)
             {
-                var header = MessagePackFileHeaderV2.Create<TodoItemDto>("TodoItems", "Id", itemCount, appIdentifier: appId);
+                var header = MessagePackFileHeaderV2.Create<TodoItemDto>("TodoItems", "Id", itemCount, appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
                 await MessagePack.MessagePackSerializer.SerializeAsync(exportStream, header);
             }
 

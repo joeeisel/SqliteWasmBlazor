@@ -63,7 +63,8 @@ internal class ExportImportDeltaConflictDeltaWinsTest(IDbContextFactory<TodoDbCo
             stream,
             "TodoItems",
             "Id",
-            appIdentifier: appId);
+            appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
         stream.Position = 0;
 
@@ -157,7 +158,8 @@ internal class ExportImportDeltaConflictDeltaWinsTest(IDbContextFactory<TodoDbCo
             stream2,
             "TodoItems",
             "Id",
-            appIdentifier: appId);
+            appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
         stream2.Position = 0;
 

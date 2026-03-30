@@ -110,14 +110,16 @@ public class MessagePackFileHeaderV2
     /// <param name="recordCount">Total record count</param>
     /// <param name="mode">0 = Seed, 1 = Delta</param>
     /// <param name="appIdentifier">Optional app identifier</param>
+    /// <param name="sqlTypeOverrides">Override SQL types for specific columns (e.g., {"Id": "BLOB"} when entity uses [Column(TypeName="BLOB")])</param>
     public static MessagePackFileHeaderV2 Create<T>(
         string tableName,
         string primaryKeyColumn,
         int recordCount,
         int mode = 0,
-        string? appIdentifier = null)
+        string? appIdentifier = null,
+        Dictionary<string, string>? sqlTypeOverrides = null)
     {
-        var columns = BuildColumnMetadata(typeof(T));
+        var columns = BuildColumnMetadata(typeof(T), sqlTypeOverrides);
 
         return new MessagePackFileHeaderV2
         {
@@ -138,7 +140,7 @@ public class MessagePackFileHeaderV2
     /// Reflect [Key(n)] attributes to build column metadata array.
     /// Each entry: [propertyName, sqlType, csharpTypeName]
     /// </summary>
-    private static string[][] BuildColumnMetadata(Type type)
+    private static string[][] BuildColumnMetadata(Type type, Dictionary<string, string>? sqlTypeOverrides = null)
     {
         var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Select(p => new
@@ -162,68 +164,84 @@ public class MessagePackFileHeaderV2
             var isNullable = Nullable.GetUnderlyingType(p.Property.PropertyType) is not null
                 || !p.Property.PropertyType.IsValueType;
 
-            var sqlType = GetSqlType(propType);
-            var csharpType = GetCsharpTypeName(propType, isNullable);
+            // Use override if provided, else detect type
+            var propName = p.Property.Name;
+            var sqlType = sqlTypeOverrides is not null && sqlTypeOverrides.TryGetValue(propName, out var overrideType)
+                ? overrideType
+                : GetSqlType(p.Property.PropertyType, propType);
+            var csharpType = GetCsharpTypeName(p.Property.PropertyType, propType, isNullable);
 
             return new[] { p.Property.Name, sqlType, csharpType };
         }).ToArray();
     }
 
-    private static string GetSqlType(Type type)
+    /// <summary>
+    /// Map C# type to SQLite column type, matching EF Core SQLite provider defaults.
+    /// </summary>
+    /// <param name="fullPropertyType">The full property type (including nullable wrapper, for collection detection)</param>
+    /// <param name="underlyingType">The unwrapped non-nullable type</param>
+    private static string GetSqlType(Type fullPropertyType, Type underlyingType)
     {
-        if (type == typeof(Guid))
-        {
-            return "BLOB";
-        }
-
-        if (type == typeof(string))
+        // JSON collections (List<T>, IList<T>, etc.) → TEXT (EF Core value converter)
+        if (IsJsonCollectionType(fullPropertyType))
         {
             return "TEXT";
         }
 
-        if (type == typeof(bool))
+        // EF Core SQLite defaults (verified from migration snapshot):
+        if (underlyingType == typeof(Guid))
+        {
+            return "TEXT"; // EF Core default — override with "BLOB" via sqlTypeOverrides if [Column(TypeName="BLOB")]
+        }
+
+        if (underlyingType == typeof(string))
+        {
+            return "TEXT";
+        }
+
+        if (underlyingType == typeof(bool))
         {
             return "INTEGER";
         }
 
-        if (type == typeof(int) || type == typeof(long) || type == typeof(short)
-            || type == typeof(byte) || type == typeof(uint) || type == typeof(ulong)
-            || type == typeof(ushort) || type == typeof(sbyte))
+        if (underlyingType == typeof(int) || underlyingType == typeof(long) || underlyingType == typeof(short)
+            || underlyingType == typeof(byte) || underlyingType == typeof(uint) || underlyingType == typeof(ulong)
+            || underlyingType == typeof(ushort) || underlyingType == typeof(sbyte))
         {
             return "INTEGER";
         }
 
-        if (type == typeof(TimeSpan))
+        if (underlyingType == typeof(TimeSpan))
         {
-            return "INTEGER"; // Stored as Ticks (int64)
+            return "TEXT"; // EF Core default — stored as TimeSpan string format
         }
 
-        if (type == typeof(DateTime) || type == typeof(DateTimeOffset))
+        if (underlyingType == typeof(DateTime) || underlyingType == typeof(DateTimeOffset))
         {
-            return "TEXT"; // Stored as ISO 8601
+            return "TEXT";
         }
 
-        if (type == typeof(decimal))
+        if (underlyingType == typeof(decimal))
         {
-            return "TEXT"; // String representation to avoid precision loss
+            return "TEXT";
         }
 
-        if (type == typeof(double) || type == typeof(float))
+        if (underlyingType == typeof(double) || underlyingType == typeof(float))
         {
             return "REAL";
         }
 
-        if (type == typeof(byte[]))
+        if (underlyingType == typeof(byte[]))
         {
             return "BLOB";
         }
 
-        if (type == typeof(char))
+        if (underlyingType == typeof(char))
         {
             return "TEXT";
         }
 
-        if (type.IsEnum)
+        if (underlyingType.IsEnum)
         {
             return "INTEGER";
         }
@@ -231,16 +249,28 @@ public class MessagePackFileHeaderV2
         return "TEXT";
     }
 
-    private static string GetCsharpTypeName(Type type, bool isNullable)
+    /// <summary>
+    /// Map C# type to csharpType name for worker-side type conversions.
+    /// </summary>
+    /// <param name="fullPropertyType">Full property type (for collection detection)</param>
+    /// <param name="underlyingType">Unwrapped non-nullable type</param>
+    /// <param name="isNullable">Whether the property is nullable</param>
+    private static string GetCsharpTypeName(Type fullPropertyType, Type underlyingType, bool isNullable)
     {
+        // JSON collections → "JsonArray" so worker knows to JSON.stringify/parse
+        if (IsJsonCollectionType(fullPropertyType))
+        {
+            return "JsonArray";
+        }
+
         // Handle enums — serialized as underlying integer by MessagePack
-        if (type.IsEnum)
+        if (underlyingType.IsEnum)
         {
             var name = "Enum";
             return isNullable ? $"{name}?" : name;
         }
 
-        var typeName = type == typeof(byte[]) ? "ByteArray" : type.Name;
+        var typeName = underlyingType == typeof(byte[]) ? "ByteArray" : underlyingType.Name;
 
         var mapped = typeName switch
         {
@@ -266,5 +296,17 @@ public class MessagePackFileHeaderV2
         };
 
         return isNullable ? $"{mapped}?" : mapped;
+    }
+
+    private static bool IsJsonCollectionType(Type type)
+    {
+        if (type.IsGenericType)
+        {
+            var genericDef = type.GetGenericTypeDefinition();
+            return genericDef == typeof(List<>) || genericDef == typeof(IList<>)
+                || genericDef == typeof(ICollection<>) || genericDef == typeof(IEnumerable<>);
+        }
+
+        return false;
     }
 }

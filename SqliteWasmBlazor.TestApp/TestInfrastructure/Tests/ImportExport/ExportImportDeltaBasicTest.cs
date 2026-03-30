@@ -48,7 +48,8 @@ internal class ExportImportDeltaBasicTest(IDbContextFactory<TodoDbContext> facto
                 initialExportStream,
                 "TodoItems",
                 "Id",
-                appIdentifier: appId);
+                appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
         }
 
         // Remember the cutoff time for patches (before modifications)
@@ -104,7 +105,8 @@ internal class ExportImportDeltaBasicTest(IDbContextFactory<TodoDbContext> facto
                 patchStream,
                 "TodoItems",
                 "Id",
-                appIdentifier: appId);
+                appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
         }
 
         patchStream.Position = 0;

@@ -73,7 +73,8 @@ internal class ExportImportDeltaConflictLocalWinsTest(IDbContextFactory<TodoDbCo
             stream,
             "TodoItems",
             "Id",
-            appIdentifier: appId);
+            appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
         stream.Position = 0;
 

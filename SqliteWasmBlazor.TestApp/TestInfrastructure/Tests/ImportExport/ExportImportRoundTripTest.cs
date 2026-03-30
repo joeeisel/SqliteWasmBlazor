@@ -42,7 +42,8 @@ internal class ExportImportRoundTripTest(IDbContextFactory<TodoDbContext> factor
                 exportStream,
                 "TodoItems",
                 "Id",
-                appIdentifier: appId);
+                appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
         }
 
         // Verify export stream has data

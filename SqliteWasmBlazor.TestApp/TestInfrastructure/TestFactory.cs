@@ -11,6 +11,7 @@ using SqliteWasmBlazor.TestApp.TestInfrastructure.Tests.RaceConditions;
 using SqliteWasmBlazor.TestApp.TestInfrastructure.Tests.Relationships;
 using SqliteWasmBlazor.TestApp.TestInfrastructure.Tests.Transactions;
 using SqliteWasmBlazor.TestApp.TestInfrastructure.Tests.TypeMarshalling;
+using SqliteWasmBlazor.TestApp.TestInfrastructure.Tests.V2Bulk;
 
 namespace SqliteWasmBlazor.TestApp.TestInfrastructure;
 
@@ -124,6 +125,11 @@ internal class TestFactory
         // Checkpoint Tests (rollback and restore functionality)
         _tests.Add(("Checkpoints", new RestoreToCheckpointBasicTest(factory)));
         _tests.Add(("Checkpoints", new RestoreToCheckpointWithDeltaReapplyTest(factory)));
+
+        // V2 Bulk Import/Export Tests (worker-side prepared statement loop)
+        _tests.Add(("V2 Bulk", new V2BulkTodoRoundTripTest(factory, databaseService)));
+        _tests.Add(("V2 Bulk", new V2BulkAllTypesRoundTripTest(factory, databaseService)));
+        _tests.Add(("V2 Bulk", new V2BulkNullableAllNullTest(factory, databaseService)));
     }
 }
 

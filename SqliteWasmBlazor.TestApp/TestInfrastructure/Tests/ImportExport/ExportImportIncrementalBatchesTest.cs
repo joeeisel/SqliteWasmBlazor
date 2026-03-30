@@ -51,7 +51,8 @@ internal class ExportImportIncrementalBatchesTest(IDbContextFactory<TodoDbContex
                 exportStream,
                 "TodoItems",
                 "Id",
-                appIdentifier: appId);
+                appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
         }
 
         exportStream.Position = 0;

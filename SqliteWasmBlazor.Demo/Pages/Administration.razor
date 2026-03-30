@@ -597,7 +597,8 @@
                 tableName: "TodoItems",
                 primaryKeyColumn: "Id",
                 recordCount: dtos.Count,
-                mode: 0);
+                mode: 0,
+                sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
             using var stream = new MemoryStream();
             MessagePackSerializer.Serialize(stream, header);

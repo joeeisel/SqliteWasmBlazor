@@ -4,7 +4,10 @@
 
 import sqlite3InitModule, { type SqlValue } from '@sqlite.org/sqlite-wasm';
 import { logger } from './sqlite-logger';
-import { pack, unpack, unpackMultiple } from 'msgpackr';
+import { pack, unpack, Unpackr } from 'msgpackr';
+
+// Unpackr preserving int64 as BigInt — JS Number loses precision for values > 2^53-1
+const bigIntUnpackr = new Unpackr({ int64AsType: 'bigint' });
 import { registerEFCoreFunctions } from './ef-core-functions';
 
 interface WorkerRequest {
@@ -748,12 +751,25 @@ function convertValueForSqlite(value: any, csharpType: string, sqlType: string):
 
     switch (baseType) {
         case 'Guid': {
-            // MessagePack-CSharp serializes Guid as 36-char string "xxxxxxxx-xxxx-..."
+            // MessagePack-CSharp serializes Guid as 36-char string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             if (sqlType === 'BLOB') {
-                // Convert to 16-byte Uint8Array for BLOB column
+                // Convert to 16-byte Uint8Array matching .NET Guid.ToByteArray() layout:
+                // Groups 1-3 are little-endian, groups 4-5 are big-endian
                 const hex = (value as string).replace(/-/g, '');
                 const bytes = new Uint8Array(16);
-                for (let i = 0; i < 16; i++) {
+                // Group 1 (4 bytes, LE): hex[0..7] reversed
+                bytes[0] = parseInt(hex.substring(6, 8), 16);
+                bytes[1] = parseInt(hex.substring(4, 6), 16);
+                bytes[2] = parseInt(hex.substring(2, 4), 16);
+                bytes[3] = parseInt(hex.substring(0, 2), 16);
+                // Group 2 (2 bytes, LE): hex[8..11] reversed
+                bytes[4] = parseInt(hex.substring(10, 12), 16);
+                bytes[5] = parseInt(hex.substring(8, 10), 16);
+                // Group 3 (2 bytes, LE): hex[12..15] reversed
+                bytes[6] = parseInt(hex.substring(14, 16), 16);
+                bytes[7] = parseInt(hex.substring(12, 14), 16);
+                // Groups 4-5 (8 bytes, BE): hex[16..31] as-is
+                for (let i = 8; i < 16; i++) {
                     bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
                 }
                 return bytes as any;
@@ -813,11 +829,15 @@ function convertValueForSqlite(value: any, csharpType: string, sqlType: string):
 
         case 'Int16':
         case 'Int32':
-        case 'Int64':
         case 'Byte':
         case 'UInt32':
-        case 'UInt64':
             return Number(value);
+
+        case 'Int64':
+        case 'UInt64':
+            // Bind as text to avoid int64 precision loss at JS↔WASM boundary.
+            // SQLite INTEGER affinity coerces text→int64 correctly in C code.
+            return String(value);
 
         case 'Double':
         case 'Single':
@@ -835,6 +855,13 @@ function convertValueForSqlite(value: any, csharpType: string, sqlType: string):
         case 'Enum':
             // MessagePack-CSharp: enum as underlying int → msgpackr: number
             return Number(value);
+
+        case 'JsonArray':
+            // EF Core JSON value converter: Array → JSON.stringify for TEXT column
+            if (Array.isArray(value)) {
+                return JSON.stringify(value);
+            }
+            return String(value);
 
         case 'ByteArray':
             // Already Uint8Array from msgpackr
@@ -862,8 +889,18 @@ function convertValueFromSqlite(value: any, csharpType: string, sqlType: string)
             // SQLite stores as BLOB (Uint8Array) or TEXT (string)
             // MessagePack-CSharp expects: 36-char string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             if (value instanceof Uint8Array && value.length === 16) {
-                const hex = Array.from(value).map(b => b.toString(16).padStart(2, '0')).join('');
-                return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+                // .NET Guid.ToByteArray() layout: groups 1-3 little-endian, 4-5 big-endian
+                const h = (i: number) => value[i].toString(16).padStart(2, '0');
+                // Group 1 (4 bytes LE → reverse for hex string)
+                const g1 = h(3) + h(2) + h(1) + h(0);
+                // Group 2 (2 bytes LE → reverse)
+                const g2 = h(5) + h(4);
+                // Group 3 (2 bytes LE → reverse)
+                const g3 = h(7) + h(6);
+                // Groups 4-5 (8 bytes BE → as-is)
+                const g4 = h(8) + h(9);
+                const g5 = h(10) + h(11) + h(12) + h(13) + h(14) + h(15);
+                return `${g1}-${g2}-${g3}-${g4}-${g5}`;
             }
             // Already a string (TEXT storage)
             return String(value);
@@ -942,11 +979,18 @@ function convertValueFromSqlite(value: any, csharpType: string, sqlType: string)
 
         case 'Int16':
         case 'Int32':
-        case 'Int64':
         case 'Byte':
         case 'UInt16':
         case 'UInt32':
+            return Number(value);
+
+        case 'Int64':
         case 'UInt64':
+            // Read as SQLITE_TEXT in bulkExport to avoid sqlite3_column_int64 boundary errors.
+            // Value arrives here as BigInt (from text parse) — pass through for msgpackr int64 packing.
+            if (typeof value === 'bigint') {
+                return value;
+            }
             return Number(value);
 
         case 'Double':
@@ -955,6 +999,17 @@ function convertValueFromSqlite(value: any, csharpType: string, sqlType: string)
 
         case 'String':
             return String(value);
+
+        case 'JsonArray':
+            // SQLite TEXT (JSON string) → parse to array for MessagePack serialization
+            if (typeof value === 'string') {
+                try {
+                    return JSON.parse(value);
+                } catch {
+                    return value;
+                }
+            }
+            return value;
 
         case 'ByteArray':
             // SQLite BLOB → already Uint8Array → msgpackr packs as bin (compatible)
@@ -1022,7 +1077,8 @@ async function bulkImport(dbName: string, payload: Uint8Array, conflictStrategy:
     }
 
     // Unpack all objects from payload: first = V2 header, rest = item arrays
-    const objects = unpackMultiple(payload);
+    // Use BigInt-aware unpackr to preserve int64 precision
+    const objects = bigIntUnpackr.unpackMultiple(payload);
 
     if (objects.length < 1) {
         throw new Error('bulkImport: empty payload');
@@ -1102,17 +1158,48 @@ async function bulkExport(dbName: string, metadata: any) {
 
     logger.info(MODULE_NAME, `bulkExport: "${tableName}" — ${sql.substring(0, 120)}`);
 
-    // Execute query
-    const bindParams = whereParams ? Object.fromEntries(
-        (whereParams as any[]).map((v: any, i: number) => [`$${i}`, v])
-    ) : undefined;
+    // Prepared statement for memory-safe row-by-row export.
+    // Int64/UInt64 columns read as SQLITE_TEXT to avoid sqlite3_column_int64
+    // boundary errors (returns wrong BigInt for values near int64 limits).
+    const colMeta = columns as string[][];
+    const csharpTypes = colMeta.map((c: string[]) => c[2]);
+    const sqlTypes = colMeta.map((c: string[]) => c[1]);
+    const colCount = colMeta.length;
 
-    const rows = db.exec({
-        sql,
-        bind: bindParams,
-        returnValue: 'resultRows',
-        rowMode: 'array'
-    }) || [];
+    // Pre-compute which columns need text-based BigInt reading
+    const isInt64Col = csharpTypes.map(t => {
+        const base = t.endsWith('?') ? t.slice(0, -1) : t;
+        return base === 'Int64' || base === 'UInt64';
+    });
+    const SQLITE_TEXT = sqlite3!.capi.SQLITE_TEXT;
+
+    const rows: any[][] = [];
+    const stmt = db.prepare(sql);
+    try {
+        if (whereParams) {
+            const binds: Record<string, any> = {};
+            (whereParams as any[]).forEach((v: any, i: number) => {
+                binds[`$${i}`] = v;
+            });
+            stmt.bind(binds);
+        }
+
+        while (stmt.step()) {
+            const row: any[] = [];
+            for (let i = 0; i < colCount; i++) {
+                if (isInt64Col[i]) {
+                    // Read as text to bypass buggy sqlite3_column_int64, then parse to BigInt
+                    const textVal = stmt.get(i, SQLITE_TEXT);
+                    row.push(textVal !== null ? BigInt(textVal as string) : null);
+                } else {
+                    row.push(stmt.get(i));
+                }
+            }
+            rows.push(row);
+        }
+    } finally {
+        stmt.finalize();
+    }
 
     // Build V2 header
     const header = [
@@ -1128,15 +1215,10 @@ async function bulkExport(dbName: string, metadata: any) {
         primaryKeyColumn || '' // [9] primaryKeyColumn
     ];
 
-    // Convert each row from SQLite types to C#-MessagePack wire format
-    const colMeta = columns as string[][];
-    const csharpTypes = colMeta.map((c: string[]) => c[2]);
-    const sqlTypes = colMeta.map((c: string[]) => c[1]);
-
     const parts: Uint8Array[] = [];
     parts.push(pack(header));
     for (const row of rows) {
-        const converted = (row as any[]).map((val, idx) =>
+        const converted = row.map((val, idx) =>
             convertValueFromSqlite(val, csharpTypes[idx], sqlTypes[idx]));
         parts.push(pack(converted));
     }

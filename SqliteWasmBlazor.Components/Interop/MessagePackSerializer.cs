@@ -22,6 +22,7 @@ public static class MessagePackSerializer<T>
         string primaryKeyColumn,
         int mode = 0,
         string? appIdentifier = null,
+        Dictionary<string, string>? sqlTypeOverrides = null,
         ILogger? logger = null,
         IProgress<(int current, int total)>? progress = null,
         CancellationToken cancellationToken = default)
@@ -42,7 +43,7 @@ public static class MessagePackSerializer<T>
 
         logger?.LogDebug("Starting V2 serialization of {Count} {Type} items", total, typeof(T).Name);
 
-        var header = MessagePackFileHeaderV2.Create<T>(tableName, primaryKeyColumn, total, mode, appIdentifier);
+        var header = MessagePackFileHeaderV2.Create<T>(tableName, primaryKeyColumn, total, mode, appIdentifier, sqlTypeOverrides);
         logger?.LogDebug("Writing V2 header: Type={Type}, SchemaHash={Hash}, Records={Count}, Table={Table}",
             header.DataType, header.SchemaHash, header.RecordCount, header.TableName);
 

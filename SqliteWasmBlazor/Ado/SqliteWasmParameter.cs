@@ -78,6 +78,12 @@ public sealed class SqliteWasmParameter : DbParameter
 /// </summary>
 public sealed class SqliteWasmParameterCollection : DbParameterCollection
 {
+    /// <summary>
+    /// JS Number.MAX_SAFE_INTEGER (2^53 - 1). Integer values beyond this range
+    /// lose precision when serialized as JSON numbers.
+    /// </summary>
+    private const long MaxSafeInteger = 9007199254740991L;
+
     private readonly List<SqliteWasmParameter> _parameters = [];
 
     public override int Count => _parameters.Count;
@@ -244,6 +250,19 @@ public sealed class SqliteWasmParameterCollection : DbParameterCollection
             {
                 // SQLite stores booleans as integers
                 sqliteType = "integer";
+            }
+            else if (value is long l and (> MaxSafeInteger or < -MaxSafeInteger))
+            {
+                // JS Number can only represent integers up to 2^53-1 precisely.
+                // JSON serialization of larger values loses precision (e.g., long.MaxValue → wrong value).
+                // Send as text — SQLite INTEGER affinity coerces text→int64 correctly in C code.
+                value = l.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                sqliteType = "text";
+            }
+            else if (value is ulong ul and > MaxSafeInteger)
+            {
+                value = ul.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                sqliteType = "text";
             }
             else if (value is sbyte or byte or short or ushort or int or uint or long or ulong)
             {

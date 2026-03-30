@@ -66,7 +66,8 @@ internal class ExportImportDeltaConflictTest(IDbContextFactory<TodoDbContext> fa
             patchStream,
             "TodoItems",
             "Id",
-            appIdentifier: appId);
+            appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
         patchStream.Position = 0;
 
@@ -184,7 +185,8 @@ internal class ExportImportDeltaConflictTest(IDbContextFactory<TodoDbContext> fa
             olderPatchStream,
             "TodoItems",
             "Id",
-            appIdentifier: appId);
+            appIdentifier: appId,
+                    sqlTypeOverrides: new Dictionary<string, string> { ["Id"] = "BLOB" });
 
         olderPatchStream.Position = 0;
 
