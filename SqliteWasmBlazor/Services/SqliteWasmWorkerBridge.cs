@@ -379,6 +379,66 @@ internal sealed partial class SqliteWasmWorkerBridge : ISqliteWasmDatabaseServic
     }
 
     /// <summary>
+    /// Bulk import from raw MessagePack row data (no V2 header needed).
+    /// Metadata sent as JSON, row data as binary payload.
+    /// </summary>
+    public async Task<int> BulkImportRawAsync(string databaseName, BulkImportMetadata metadata, byte[] rowData,
+        ConflictResolutionStrategy conflictStrategy = ConflictResolutionStrategy.None,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+
+        var requestId = Interlocked.Increment(ref _nextRequestId);
+        var tcs = new TaskCompletionSource<SqlQueryResult>();
+
+        _pendingRequests[requestId] = tcs;
+
+        try
+        {
+            await using var registration = cancellationToken.Register(() =>
+            {
+                _pendingRequests.TryRemove(requestId, out _);
+                tcs.TrySetCanceled();
+            });
+
+            var metadataJson = JsonSerializer.Serialize(new
+            {
+                id = requestId,
+                data = new
+                {
+                    type = "bulkImportRaw",
+                    database = databaseName,
+                    conflictStrategy = (int)conflictStrategy,
+                    tableName = metadata.TableName,
+                    columns = metadata.Columns,
+                    primaryKeyColumn = metadata.PrimaryKeyColumn
+                }
+            });
+
+            SendBinaryToWorker(new ArraySegment<byte>(rowData), metadataJson);
+
+            // 5-minute timeout for bulk operations
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(300_000);
+
+            try
+            {
+                var result = await tcs.Task.WaitAsync(timeoutCts.Token);
+                return result.RowsAffected;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("Bulk import operation timed out after 5 minutes.");
+            }
+        }
+        catch
+        {
+            _pendingRequests.TryRemove(requestId, out _);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Bulk export: worker queries SQLite directly and returns V2 MessagePack bytes.
     /// </summary>
     public async Task<byte[]> BulkExportAsync(string databaseName, BulkExportMetadata exportMetadata, CancellationToken cancellationToken = default)

@@ -73,6 +73,23 @@ public interface ISqliteWasmDatabaseService
     Task<int> BulkImportAsync(string databaseName, byte[] payload, ConflictResolutionStrategy conflictStrategy = ConflictResolutionStrategy.None, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Bulk import from raw MessagePack row data with metadata provided separately.
+    /// The payload is a MessagePack-serialized List of row arrays (no V2 header required).
+    /// Column metadata is sent to the worker as JSON alongside the binary payload.
+    /// This enables callers that already have MessagePack-serialized data (e.g., sync services)
+    /// to bypass V2 header construction.
+    /// </summary>
+    /// <param name="databaseName">Target database filename</param>
+    /// <param name="metadata">Table structure metadata (table name, columns, primary key)</param>
+    /// <param name="rowData">MessagePack-serialized List of row arrays (msgpack List&lt;TDto&gt;)</param>
+    /// <param name="conflictStrategy">Conflict resolution strategy for UPSERT behavior</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Number of rows inserted</returns>
+    Task<int> BulkImportRawAsync(string databaseName, BulkImportMetadata metadata, byte[] rowData,
+        ConflictResolutionStrategy conflictStrategy = ConflictResolutionStrategy.None,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Bulk export: worker queries SQLite directly and returns V2 MessagePack bytes (header + rows).
     /// C# receives raw bytes for file download without per-item processing.
     /// </summary>

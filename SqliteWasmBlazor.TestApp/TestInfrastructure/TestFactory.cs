@@ -118,6 +118,8 @@ internal class TestFactory
         _tests.Add(("V2 Bulk", new V2BulkConflictLastWriteWinsTest(factory, databaseService)));
         _tests.Add(("V2 Bulk", new V2BulkConflictLocalWinsTest(factory, databaseService)));
         _tests.Add(("V2 Bulk", new V2BulkConflictDeltaWinsTest(factory, databaseService)));
+        _tests.Add(("V2 Bulk Raw", new V2BulkRawImportTest(factory, databaseService)));
+        _tests.Add(("V2 Bulk Raw", new V2BulkRawImportConflictTest(factory, databaseService)));
     }
 }
 

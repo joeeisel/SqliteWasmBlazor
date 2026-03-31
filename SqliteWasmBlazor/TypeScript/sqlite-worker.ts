@@ -259,6 +259,16 @@ async function handleRequest(data: WorkerRequest['data'], binaryPayload?: ArrayB
                 (data as any).conflictStrategy ?? 0
             );
 
+        case 'bulkImportRaw':
+            if (!binaryPayload) {
+                throw new Error('bulkImportRaw requires binaryPayload');
+            }
+            return await bulkImportRaw(
+                database!,
+                new Uint8Array(binaryPayload),
+                data as any
+            );
+
         case 'bulkExport':
             return await bulkExport(database!, data as any);
 
@@ -1067,33 +1077,19 @@ function buildInsertSql(header: V2Header, conflictStrategy: number): string {
 }
 
 /**
- * Bulk import: unpack V2 MessagePack payload, insert with prepared statement loop.
- * One worker round-trip per batch instead of ~80.
+ * Core bulk insert: builds SQL from header, converts values, inserts rows in a transaction.
+ * Shared by bulkImport (V2 header in payload) and bulkImportRaw (metadata in JSON).
  */
-async function bulkImport(dbName: string, payload: Uint8Array, conflictStrategy: number) {
-    const db = openDatabases.get(dbName);
-    if (!db) {
-        throw new Error(`Database ${dbName} not open`);
-    }
-
-    // Unpack all objects from payload: first = V2 header, rest = item arrays
-    // Use BigInt-aware unpackr to preserve int64 precision
-    const objects = bigIntUnpackr.unpackMultiple(payload);
-
-    if (objects.length < 1) {
-        throw new Error('bulkImport: empty payload');
-    }
-
-    // First object is the V2 header (MessagePack array with positional keys)
-    const header: V2Header = objects[0];
+function bulkInsertRows(db: any, header: V2Header, rows: any[][], conflictStrategy: number, label: string) {
     const columns = header[8];
     const csharpTypes = columns.map(c => c[2]);
     const sqlTypes = columns.map(c => c[1]);
+    const tableName = header[7];
 
-    logger.info(MODULE_NAME, `bulkImport: ${objects.length - 1} items into "${header[7]}", strategy=${conflictStrategy}`);
+    logger.info(MODULE_NAME, `${label}: ${rows.length} items into "${tableName}", strategy=${conflictStrategy}`);
 
     const sql = buildInsertSql(header, conflictStrategy);
-    logger.debug(MODULE_NAME, `bulkImport SQL: ${sql}`);
+    logger.debug(MODULE_NAME, `${label} SQL: ${sql}`);
 
     let rowsAffected = 0;
 
@@ -1101,10 +1097,9 @@ async function bulkImport(dbName: string, payload: Uint8Array, conflictStrategy:
     try {
         const stmt = db.prepare(sql);
         try {
-            for (let i = 1; i < objects.length; i++) {
-                const row = objects[i] as any[];
-                // Convert each value according to its csharpType
-                const converted = row.map((val, idx) => convertValueForSqlite(val, csharpTypes[idx], sqlTypes[idx]));
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i] as any[];
+                const converted = row.map((val: any, idx: number) => convertValueForSqlite(val, csharpTypes[idx], sqlTypes[idx]));
                 stmt.bind(converted);
                 stmt.step();
                 stmt.reset();
@@ -1120,12 +1115,62 @@ async function bulkImport(dbName: string, payload: Uint8Array, conflictStrategy:
         } catch {
             // Ignore rollback errors
         }
-        logger.error(MODULE_NAME, `bulkImport failed:`, error);
+        logger.error(MODULE_NAME, `${label} failed:`, error);
         throw error;
     }
 
-    logger.info(MODULE_NAME, `✓ bulkImport: ${rowsAffected} rows inserted into "${header[7]}"`);
+    logger.info(MODULE_NAME, `✓ ${label}: ${rowsAffected} rows inserted into "${tableName}"`);
     return { rowsAffected };
+}
+
+/**
+ * Bulk import: unpack V2 MessagePack payload (header + individually packed rows).
+ */
+async function bulkImport(dbName: string, payload: Uint8Array, conflictStrategy: number) {
+    const db = openDatabases.get(dbName);
+    if (!db) {
+        throw new Error(`Database ${dbName} not open`);
+    }
+
+    const objects = bigIntUnpackr.unpackMultiple(payload);
+    if (objects.length < 1) {
+        throw new Error('bulkImport: empty payload');
+    }
+
+    const header: V2Header = objects[0];
+    const rows = objects.slice(1) as any[][];
+
+    return bulkInsertRows(db, header, rows, conflictStrategy, 'bulkImport');
+}
+
+/**
+ * Bulk import from raw MessagePack row data (no V2 header).
+ * Metadata comes from the JSON message, rows are a single packed array.
+ */
+async function bulkImportRaw(dbName: string, payload: Uint8Array, metadata: any) {
+    const db = openDatabases.get(dbName);
+    if (!db) {
+        throw new Error(`Database ${dbName} not open`);
+    }
+
+    const { tableName, columns, primaryKeyColumn, conflictStrategy } = metadata;
+    if (!tableName || !columns || !primaryKeyColumn) {
+        throw new Error('bulkImportRaw requires tableName, columns, and primaryKeyColumn in metadata');
+    }
+
+    const header: V2Header = {
+        0: 'SWBV2', 1: '', 2: '', 3: null, 4: '', 5: 0, 6: 0,
+        7: tableName,
+        8: columns,
+        9: primaryKeyColumn
+    };
+
+    const rows = bigIntUnpackr.unpack(payload) as any[][];
+    if (!Array.isArray(rows)) {
+        throw new Error('bulkImportRaw: payload must be a MessagePack array of row arrays');
+    }
+
+    return bulkInsertRows(db, header, rows, conflictStrategy ?? 0, 'bulkImportRaw');
 }
 
 /**

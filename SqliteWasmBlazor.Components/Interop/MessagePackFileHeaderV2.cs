@@ -140,7 +140,7 @@ public class MessagePackFileHeaderV2
     /// Reflect [Key(n)] attributes to build column metadata array.
     /// Each entry: [propertyName, sqlType, csharpTypeName]
     /// </summary>
-    private static string[][] BuildColumnMetadata(Type type, Dictionary<string, string>? sqlTypeOverrides = null)
+    public static string[][] BuildColumnMetadata(Type type, Dictionary<string, string>? sqlTypeOverrides = null)
     {
         var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Select(p => new
