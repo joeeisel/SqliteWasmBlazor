@@ -20,9 +20,9 @@
     <!-- Use ProjectReference for all configurations - TestApp is for internal testing only -->
     <ItemGroup>
         <NativeFileReference Include="..\SqliteWasmBlazor\native\lib\e_sqlite3.a" />
+        <ProjectReference Include="..\SqliteWasmBlazor\SqliteWasmBlazor.csproj" />
         <ProjectReference Include="..\SqliteWasmBlazor.Models\SqliteWasmBlazor.Models.csproj" />
         <ProjectReference Include="..\SqliteWasmBlazor.Components\SqliteWasmBlazor.Components.csproj" />
-        <PackageReference Include="SqliteWasmBlazor" Version="$(SqliteWasmBlazorVersion)" />
     </ItemGroup>
     
 </Project>
